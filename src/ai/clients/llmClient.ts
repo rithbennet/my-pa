@@ -1,0 +1,52 @@
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { generateObject } from "ai";
+import { z } from "zod";
+import { env } from "@/infra/config/env.ts";
+import { logger } from "@/infra/logging/logger.ts";
+
+export type LogicalModel = "cheap" | "smart";
+
+const modelMap: Record<LogicalModel, string> = {
+  cheap: "gemini-2.5-flash",
+  smart: "gemini-2.5-pro",
+};
+
+const log = logger.child({ module: "llmClient" });
+
+const google = createGoogleGenerativeAI({
+  apiKey: env.GEMINI_API_KEY,
+});
+
+export function getModel(model: LogicalModel | string) {
+  const modelId =
+    model in modelMap ? modelMap[model as LogicalModel] : String(model);
+  return google(modelId);
+}
+
+export async function callStructuredLLM<T>({
+  prompt,
+  schema,
+  model = "cheap",
+}: {
+  prompt: string;
+  schema: z.ZodTypeAny;
+  model?: LogicalModel | string;
+}): Promise<T> {
+  try {
+    log.debug(
+      { model, promptLength: prompt.length },
+      "calling structured LLM"
+    );
+    const { object } = await generateObject({
+      model: getModel(model),
+      schema,
+      prompt,
+    });
+    log.debug({ model }, "structured LLM response received");
+    return object as T;
+  } catch (error) {
+    log.error({ model, err: error }, "structured LLM call failed");
+    throw error;
+  }
+}
+
