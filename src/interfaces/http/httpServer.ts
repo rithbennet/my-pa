@@ -30,7 +30,23 @@ export async function buildHttpServer() {
   fastify.setValidatorCompiler(validatorCompiler);
   fastify.setSerializerCompiler(serializerCompiler);
 
-  await fastify.register(cors, { origin: true });
+  // Configure CORS with an allowlist from environment variable
+  const allowedOrigins = (env.CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map(origin => origin.trim())
+    .filter(Boolean);
+
+  await fastify.register(cors, {
+    origin: (origin, cb) => {
+      // Allow requests with no origin (like mobile apps or curl)
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) {
+        cb(null, true);
+      } else {
+        cb(new Error("Not allowed by CORS"), false);
+      }
+    }
+  });
   await fastify.register(helmet);
 
   fastify.addHook("onRequest", async (request, reply) => {
