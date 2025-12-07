@@ -1,7 +1,7 @@
 import { buildHttpServer } from "./src/interfaces/http/httpServer.ts";
 import { env } from "./src/infra/config/env.ts";
 
-const port = env.PORT ?? 3000;
+const port = env.PORT;
 const server = await buildHttpServer();
 
 try {
