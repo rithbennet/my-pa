@@ -6,25 +6,16 @@ import {
   validatorCompiler,
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
-import { env } from "../../infra/config/env.ts";
+import { env } from "@/infra/config/env.ts";
 import { registerHealthRoutes } from "./routes/healthRoutes.ts";
 import { registerTaskRoutes } from "./routes/taskRoutes.ts";
 import { registerNotionRoutes } from "./routes/notionRoutes.ts";
+import { loggerOptions } from "@/infra/logging/logger.ts";
 
 export async function buildHttpServer() {
   const fastify = Fastify({
-    logger: {
-      level: "info",
-      transport: {
-        target: "pino-pretty",
-        options: {
-          colorize: true,
-          translateTime: "SYS:standard",
-          ignore: "pid,hostname",
-          singleLine: false,
-        },
-      },
-    },
+    // Fastify expects a logger options object or instance; pass options to let it build its own logger.
+    logger: loggerOptions,
   }).withTypeProvider<ZodTypeProvider>();
 
   fastify.setValidatorCompiler(validatorCompiler);
@@ -53,8 +44,7 @@ export async function buildHttpServer() {
     if (request.url.startsWith("/health")) return;
     const apiKey = request.headers["x-api-key"];
     if (apiKey !== env.API_KEY) {
-      reply.code(401);
-      return { error: "unauthorized" };
+      return reply.code(401).send({ error: "unauthorized" });
     }
   });
 

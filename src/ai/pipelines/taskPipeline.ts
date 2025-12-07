@@ -10,8 +10,13 @@ import {
   schemas,
   statusValues,
 } from "../schemas/taskSchemas.ts";
+import { logger } from "../../infra/logging/logger.ts";
 
-const todayIsoDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD reference
+const log = logger.child({ module: "taskPipeline" });
+
+function getTodayIsoDate(now: Date = new Date()) {
+  return now.toISOString().slice(0, 10); // YYYY-MM-DD reference
+}
 
 const dueDateResolverSchema = z.object({
   dueDate: z.string().datetime().nullable(),
@@ -22,7 +27,9 @@ type DueDateResolverResult = z.infer<typeof dueDateResolverSchema>;
 export async function runTaskParsingPipeline(
   text: string
 ): Promise<ParsedTask[]> {
-  const prompt = buildTaskParsingPrompt(todayIsoDate, text);
+  log.info({ textLength: text.length }, "running task parsing pipeline");
+  const prompt = buildTaskParsingPrompt(getTodayIsoDate(), text);
+  log.debug({ promptLength: prompt.length }, "built task parsing prompt");
   const { tasks } = await callStructuredLLM<{ tasks: ParsedTaskInput[] }>({
     prompt,
     schema: parsedTasksSchema,
@@ -49,13 +56,14 @@ async function resolveDueDateWithModel(
     /today|tomorrow|next week|next month|this week|by |due /i.test(text);
   if (!hasDateHint) return undefined;
 
+  log.debug({ textLength: text.length }, "resolving due date via model");
   const { dueDate } = await callStructuredLLM<DueDateResolverResult>({
     model: "cheap",
     schema: dueDateResolverSchema,
     prompt: [
       "Extract a clear due date from the text if one is implied or stated.",
       "Return an ISO 8601 string (date or datetime). If no due date is present, return null.",
-      `Today's date: ${todayIsoDate}. Use it to resolve relative terms.`,
+      `Today's date: ${getTodayIsoDate()}. Use it to resolve relative terms.`,
       "Assume the user's local time; prefer YYYY-MM-DD (no time) when only a day is given.",
       "",
       `Text: ${text}`,
@@ -106,37 +114,38 @@ function parseNaturalDate(value: string): string | undefined {
   const lower = value.toLowerCase().trim();
   const now = new Date();
 
-  const startOfDay = (date: Date) => {
-    const d = new Date(date);
-    d.setHours(0, 0, 0, 0);
+  const startOfUtcDay = (date: Date) => {
+    const d = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+    );
     return d.toISOString();
   };
 
   if (lower === "today" || lower.includes("by today")) {
-    return startOfDay(now);
+    return startOfUtcDay(now);
   }
   if (lower === "tomorrow" || lower.includes("by tomorrow")) {
     const d = new Date(now);
-    d.setDate(d.getDate() + 1);
-    return startOfDay(d);
+    d.setUTCDate(d.getUTCDate() + 1);
+    return startOfUtcDay(d);
   }
   if (lower.includes("next week")) {
     const d = new Date(now);
-    d.setDate(d.getDate() + 7);
-    return startOfDay(d);
+    d.setUTCDate(d.getUTCDate() + 7);
+    return startOfUtcDay(d);
   }
   if (lower.includes("next month")) {
     const d = new Date(now);
-    d.setMonth(d.getMonth() + 1);
-    return startOfDay(d);
+    d.setUTCMonth(d.getUTCMonth() + 1);
+    return startOfUtcDay(d);
   }
   if (lower.includes("this week")) {
     // Set to end of this week (Sunday)
     const d = new Date(now);
-    const day = d.getDay();
+    const day = d.getUTCDay();
     const diff = 7 - day;
-    d.setDate(d.getDate() + diff);
-    return startOfDay(d);
+    d.setUTCDate(d.getUTCDate() + diff);
+    return startOfUtcDay(d);
   }
   return undefined;
 }

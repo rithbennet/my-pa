@@ -1,6 +1,7 @@
-import type { ParsedTask } from "../../ai/schemas/taskSchemas.ts";
-import { env } from "../config/env.ts";
-import { notionClient } from "./notionClient.ts";
+import type { ParsedTask } from "@/ai/schemas/taskSchemas.ts";
+import { env } from "@/infra/config/env.ts";
+import { notionClient } from "@/infra/notion/notionClient.ts";
+import { logger } from "@/infra/logging/logger.ts";
 
 type SelectOption = { name: string };
 type SelectLikeOptions = { options?: SelectOption[] };
@@ -37,6 +38,24 @@ class NotionTaskRepo {
   private cachedProperties: DatabaseProperties | null = null;
   private parentRelationProperty: string | null = null;
   private normalizedPropertyNames: Record<string, string> = {};
+  private optionLocks = new Map<string, Promise<unknown>>();
+  private log = logger.child({ module: "notionTaskRepo" });
+
+  private buildOptionLockKey(propName: string, optionName: string) {
+    return `${this.normalizePropertyKey(propName)}::${optionName
+      .toLowerCase()
+      .trim()}`;
+  }
+
+  private async withOptionLock<T>(
+    key: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const previous = this.optionLocks.get(key) ?? Promise.resolve();
+    const next = previous.then(fn, fn);
+    this.optionLocks.set(key, next.catch(() => undefined));
+    return next;
+  }
 
   async getDatabaseInfo() {
     const db = await notionClient.databases.retrieve({
@@ -62,6 +81,10 @@ class NotionTaskRepo {
     tasks: ParsedTask[],
     options?: CreateTaskOptions
   ): Promise<CreatedTask[]> {
+    this.log.info(
+      { count: tasks.length, source: options?.source },
+      "creating tasks in Notion"
+    );
     await this.ensureMetadata();
     const results: CreatedTask[] = [];
     for (const task of tasks) {
@@ -191,6 +214,7 @@ class NotionTaskRepo {
       parent: { database_id: env.NOTION_DATABASE_ID },
       properties: properties as any,
     });
+    this.log.info({ title: task.title, pageId: page.id }, "created notion page");
 
     const children: CreatedTask[] = [];
     for (const child of task.subtasks ?? []) {
@@ -306,85 +330,92 @@ class NotionTaskRepo {
     propertyType?: DatabaseProperty["type"];
   }> {
     if (!optionName) return {};
-    await this.ensureMetadata();
-    let resolved = this.resolvePropertyName(propName);
-    if (!resolved) {
-      // If not found by name, but there's exactly one property of the needed type,
-      // try type-based fallback.
-      const desiredType = propName.toLowerCase().includes("status")
-        ? "status"
-        : propName.toLowerCase().includes("type")
-        ? "multi_select"
-        : undefined;
-      if (desiredType) {
-        resolved = this.fallbackPropertyByType(desiredType);
+    const lockKey = this.buildOptionLockKey(propName, optionName);
+    return this.withOptionLock(lockKey, async () => {
+      await this.ensureMetadata();
+      let resolved = this.resolvePropertyName(propName);
+      if (!resolved) {
+        // If not found by name, but there's exactly one property of the needed type,
+        // try type-based fallback.
+        const desiredType = propName.toLowerCase().includes("status")
+          ? "status"
+          : propName.toLowerCase().includes("type")
+          ? "multi_select"
+          : undefined;
+        if (desiredType) {
+          resolved = this.fallbackPropertyByType(desiredType);
+        }
       }
-    }
-    if (!resolved) return { name: optionName };
-    const { name: resolvedName, property } = resolved;
+      if (!resolved) return { name: optionName };
+      const { name: resolvedName, property } = resolved;
 
-    if (
-      property.type !== "select" &&
-      property.type !== "multi_select" &&
-      property.type !== "status"
-    ) {
-      return {
-        name: optionName,
-        propertyName: resolvedName,
-        propertyType: property.type,
-      };
-    }
+      if (
+        property.type !== "select" &&
+        property.type !== "multi_select" &&
+        property.type !== "status"
+      ) {
+        return {
+          name: optionName,
+          propertyName: resolvedName,
+          propertyType: property.type,
+        };
+      }
 
-    const options: SelectOption[] =
-      property.type === "select"
-        ? (property as SelectProperty).select?.options ?? []
-        : property.type === "multi_select"
-        ? (property as MultiSelectProperty).multi_select?.options ?? []
-        : (property as StatusProperty).status?.options ?? [];
+      const options: SelectOption[] =
+        property.type === "select"
+          ? (property as SelectProperty).select?.options ?? []
+          : property.type === "multi_select"
+          ? (property as MultiSelectProperty).multi_select?.options ?? []
+          : (property as StatusProperty).status?.options ?? [];
 
-    if (options.some((opt) => opt.name === optionName))
-      return {
-        name: optionName,
-        propertyName: resolvedName,
-        propertyType: property.type,
-      };
+      if (options.some((opt) => opt.name === optionName))
+        return {
+          name: optionName,
+          propertyName: resolvedName,
+          propertyType: property.type,
+        };
 
-    // Avoid trying to mutate status options; Notion restricts status option updates.
-    if (property.type === "status") {
-      return {
-        name: optionName,
-        propertyName: resolvedName,
-        propertyType: property.type,
-      };
-    }
+      // Avoid trying to mutate status options; Notion restricts status option updates.
+      if (property.type === "status") {
+        return {
+          name: optionName,
+          propertyName: resolvedName,
+          propertyType: property.type,
+        };
+      }
 
-    const updated = await notionClient.databases.update({
-      database_id: env.NOTION_DATABASE_ID,
-      properties: {
-        [resolvedName]: {
-          [property.type]: {
-            options: [...options, { name: optionName }],
+      const updated = await notionClient.databases.update({
+        database_id: env.NOTION_DATABASE_ID,
+        properties: {
+          [resolvedName]: {
+            [property.type]: {
+              options: [...options, { name: optionName }],
+            },
           },
         },
-      },
-    } as any);
+      } as any);
+      this.log.info(
+        { property: resolvedName, option: optionName },
+        "added select option to notion property"
+      );
 
-    const updatedProps = (updated as { properties?: DatabaseProperties })
-      .properties;
-    if (updatedProps) {
-      this.cachedProperties = updatedProps;
-      this.normalizedPropertyNames = Object.keys(updatedProps).reduce<
-        Record<string, string>
-      >((acc, key) => {
-        acc[this.normalizePropertyKey(key)] = key;
-        return acc;
-      }, {});
-    }
-    return {
-      name: optionName,
-      propertyName: resolvedName,
-      propertyType: property.type,
-    };
+      const updatedProps = (updated as { properties?: DatabaseProperties })
+        .properties;
+      if (updatedProps) {
+        this.cachedProperties = updatedProps;
+        this.normalizedPropertyNames = Object.keys(updatedProps).reduce<
+          Record<string, string>
+        >((acc, key) => {
+          acc[this.normalizePropertyKey(key)] = key;
+          return acc;
+        }, {});
+      }
+      return {
+        name: optionName,
+        propertyName: resolvedName,
+        propertyType: property.type,
+      };
+    });
   }
 }
 

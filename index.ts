@@ -1,5 +1,5 @@
-import { buildHttpServer } from "./src/interfaces/http/httpServer.ts";
-import { env } from "./src/infra/config/env.ts";
+import { buildHttpServer } from "@/interfaces/http/httpServer.ts";
+import { env } from "@/infra/config/env.ts";
 
 const port = env.PORT;
 const server = await buildHttpServer();
